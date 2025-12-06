@@ -326,6 +326,31 @@ def getImagesAndLabels(path):
 
 ###########################################################################################
 
+def load_attendance():
+    """Load and display attendance records from today's CSV file in the treeview."""
+    # Clear existing entries
+    for k in tv.get_children():
+        tv.delete(k)
+    
+    # Get today's date for attendance file
+    ts = time.time()
+    date = datetime.datetime.fromtimestamp(ts).strftime('%d-%m-%Y')
+    attendance_path = p(f"Attendance/Attendance_{date}.csv")
+    
+    # Load attendance records if file exists
+    if os.path.isfile(attendance_path):
+        try:
+            with open(attendance_path, 'r', newline='', encoding='utf-8') as csvFile1:
+                reader1 = csv.reader(csvFile1)
+                next(reader1, None)  # Skip header
+                for lines in reader1:
+                    if len(lines) >= 7:
+                        tv.insert('', 0, text=(str(lines[0]) + '   '), values=(str(lines[2]), str(lines[4]), str(lines[6])))
+        except Exception as e:
+            print(f"Error loading attendance: {e}")
+
+###########################################################################################
+
 def TrackImages():
     check_haarcascadefile()
     assure_dir(p("Attendance/"))
@@ -375,7 +400,28 @@ def TrackImages():
         window.destroy()
         return
 
-    attendance = None
+    # Get today's date for attendance file
+    ts = time.time()
+    date = datetime.datetime.fromtimestamp(ts).strftime('%d-%m-%Y')
+    attendance_path = p(f"Attendance/Attendance_{date}.csv")
+    
+    # Track already marked IDs to avoid duplicates in same session
+    marked_ids = set()
+    # Track IDs that were just recorded in this session (for popup)
+    just_recorded = set()
+    
+    # Load existing attendance to avoid duplicates
+    if os.path.isfile(attendance_path):
+        try:
+            with open(attendance_path, 'r', newline='', encoding='utf-8') as csvFile1:
+                reader1 = csv.reader(csvFile1)
+                next(reader1, None)  # Skip header
+                for row in reader1:
+                    if len(row) > 0:
+                        marked_ids.add(row[0])  # Store ID
+        except Exception:
+            pass
+    
     while True:
         ret, im = cam.read()
         if not ret:
@@ -388,50 +434,102 @@ def TrackImages():
                 serial, conf = recognizer.predict(gray[y:y + h, x:x + w])
             except Exception:
                 serial, conf = -1, 1000
+            
             if conf < 50:
-                ts = time.time()
-                date = datetime.datetime.fromtimestamp(ts).strftime('%d-%m-%Y')
-                timeStamp = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S')
-                aa = df.loc[df['SERIAL NO.'] == serial]['NAME'].values
-                ID = df.loc[df['SERIAL NO.'] == serial]['ID'].values
-                ID = str(ID)
-                ID = ID[1:-1]
-                bb = str(aa)
-                bb = bb[2:-2]
-                attendance = [str(ID), '', bb, '', str(date), '', str(timeStamp)]
+                try:
+                    # Find student by serial number
+                    student_row = df[df['SERIAL NO.'] == serial]
+                    if not student_row.empty:
+                        # Get first matching row
+                        ID = str(student_row.iloc[0]['ID']).strip()
+                        student_name = str(student_row.iloc[0]['NAME']).strip()
+                        bb = student_name  # Display name
+                        
+                        # Write attendance immediately if not already marked
+                        if ID not in marked_ids:
+                            ts = time.time()
+                            date = datetime.datetime.fromtimestamp(ts).strftime('%d-%m-%Y')
+                            timeStamp = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S')
+                            attendance = [str(ID), '', student_name, '', str(date), '', str(timeStamp)]
+                            
+                            # Write to file
+                            try:
+                                if os.path.isfile(attendance_path):
+                                    with open(attendance_path, 'a+', newline='', encoding='utf-8') as csvFile1:
+                                        writer = csv.writer(csvFile1)
+                                        writer.writerow(attendance)
+                                else:
+                                    with open(attendance_path, 'a+', newline='', encoding='utf-8') as csvFile1:
+                                        writer = csv.writer(csvFile1)
+                                        writer.writerow(col_names)
+                                        writer.writerow(attendance)
+                                
+                                # Mark as recorded
+                                marked_ids.add(ID)
+                                
+                                # Update treeview immediately (force update)
+                                tv.insert('', 0, text=(str(ID) + '   '), values=(student_name, str(date), str(timeStamp)))
+                                window.update()  # Force UI update
+                                
+                                # Show popup notification only once per ID
+                                if ID not in just_recorded:
+                                    mess._show(title='Attendance Recorded ✓', message=f'Attendance successfully recorded!\n\nName: {student_name}\nID: {ID}\nTime: {timeStamp}\nDate: {date}')
+                                    just_recorded.add(ID)
+                                
+                                # Show success message on camera feed
+                                bb = student_name + ' - ✓ RECORDED!'
+                                
+                                # Show confirmation in console
+                                print(f"✓ Attendance recorded: {student_name} (ID: {ID}) at {timeStamp}")
+                            except Exception as write_error:
+                                bb = bb + ' - ✗ ERROR!'
+                                print(f"Error writing attendance: {write_error}")
+                                mess._show(title='Error', message=f'Failed to save attendance:\n{write_error}')
+                        else:
+                            # Already marked today
+                            bb = bb + ' (Already Marked)'
+                    else:
+                        bb = 'Unknown (Serial: ' + str(serial) + ')'
+                except Exception as e:
+                    bb = 'Error: ' + str(e)
+                    print(f"Error in recognition: {e}")
             else:
-                bb = 'Unknown'
-                attendance = None
-            cv2.putText(im, str(bb), (x, y + h), font, 1, (255, 255, 255), 2)
+                bb = 'Unknown (Conf: ' + str(int(conf)) + ')'
+            
+            # Display name and status on camera feed
+            # Use green color for successful recording, white for others
+            if 'RECORDED' in bb or '✓' in bb:
+                color = (0, 255, 0)  # Green for success
+                thickness = 2
+            elif 'Already Marked' in bb:
+                color = (0, 165, 255)  # Orange for already marked
+                thickness = 2
+            else:
+                color = (255, 255, 255)  # White for others
+                thickness = 1
+            
+            cv2.putText(im, str(bb), (x, y + h), font, 1, color, thickness)
+            
+            # Show status at top of frame for better visibility
+            if 'RECORDED' in bb or '✓' in bb:
+                cv2.putText(im, 'ATTENDANCE SAVED TO FILE!', (10, 30), font, 1, (0, 255, 0), 2)
+                cv2.putText(im, 'Check the table on the left', (10, 60), font, 0.7, (0, 255, 0), 2)
 
         cv2.imshow('Taking Attendance', im)
         if (cv2.waitKey(1) == ord('q')):
             break
 
-    # write attendance if found
-    ts = time.time()
-    date = datetime.datetime.fromtimestamp(ts).strftime('%d-%m-%Y')
-    attendance_path = p(f"Attendance/Attendance_{date}.csv")
-    if attendance:
-        if os.path.isfile(attendance_path):
-            with open(attendance_path, 'a+', newline='', encoding='utf-8') as csvFile1:
-                writer = csv.writer(csvFile1)
-                writer.writerow(attendance)
-        else:
-            with open(attendance_path, 'a+', newline='', encoding='utf-8') as csvFile1:
-                writer = csv.writer(csvFile1)
-                writer.writerow(col_names)
-                writer.writerow(attendance)
-
-    # populate treeview
+    # Refresh treeview with all attendance records for today
     if os.path.isfile(attendance_path):
+        # Clear existing entries
+        for k in tv.get_children():
+            tv.delete(k)
+        # Reload all entries
         with open(attendance_path, 'r', newline='', encoding='utf-8') as csvFile1:
             reader1 = csv.reader(csvFile1)
-            i = 0
+            next(reader1, None)  # Skip header
             for lines in reader1:
-                i += 1
-                if i > 1:
-                    # insert alternate rows (keeps old behavior)
+                if len(lines) >= 7:
                     tv.insert('', 0, text=(str(lines[0]) + '   '), values=(str(lines[2]), str(lines[4]), str(lines[6])))
 
     cam.release()
@@ -593,6 +691,10 @@ quitWindow.place(x=30, y=450)
 ##################### END ######################################
 
 window.configure(menu=menubar)
+
+# Load existing attendance records on startup
+load_attendance()
+
 window.mainloop()
 
 ####################################################################################################
